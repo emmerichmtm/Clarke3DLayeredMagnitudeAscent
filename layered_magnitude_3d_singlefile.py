@@ -485,6 +485,7 @@ class RunResult:
     accepted_steps: int
 
 
+
 def run_projected_ascent(
     objective_fn,
     jacobian_fn,
@@ -499,6 +500,9 @@ def run_projected_ascent(
     normalize_per_point=True,
     shrink=0.96,
     max_retries=8,
+    verbose=True,
+    progress_every=1,
+    label="run",
 ):
     X = projector(np.asarray(X0, float).copy())
     Y = objective_fn(X)
@@ -510,7 +514,10 @@ def run_projected_ascent(
     Xinit = X.copy()
     Yinit = Y.copy()
 
-    for _ in range(max_iter):
+    if verbose:
+        print(f"[{label}] start: iter=0/{max_iter}, value={val:.12f}, alpha={alpha:.6g}")
+
+    for it in range(1, max_iter + 1):
         J = jacobian_fn(X)
         GX = np.einsum("nij,ni->nj", J, GY)
         if normalize_per_point:
@@ -532,6 +539,11 @@ def run_projected_ascent(
             alpha = trial_alpha
         values.append(val)
         alphas.append(alpha)
+
+        if verbose and (it % max(1, progress_every) == 0 or it == max_iter):
+            status = "accepted" if accepted else "stalled"
+            print(f"[{label}] iter={it}/{max_iter}, value={val:.12f}, alpha={alpha:.6g}, {status}, accepted_steps={accepted_steps}")
+
     return RunResult(Xinit, Yinit, X, Y, values, alphas, accepted_steps)
 
 
@@ -612,7 +624,7 @@ def approx_reference(objective_fn, projector, n_dec, lo, hi, samples, rng):
     return nondominated_subset(objective_fn(projector(X)))
 
 
-def run_three_peaks(prefix="three_peaks", outdir=".", seed=8, n_points=15, max_iter=48):
+def run_three_peaks(prefix="three_peaks", outdir=".", seed=8, n_points=15, max_iter=48, verbose=True, progress_every=1):
     out = Path(outdir)
     out.mkdir(parents=True, exist_ok=True)
     rng = np.random.default_rng(seed)
@@ -632,6 +644,9 @@ def run_three_peaks(prefix="three_peaks", outdir=".", seed=8, n_points=15, max_i
         tau=5e-4,
         shrink=0.96,
         max_retries=8,
+        verbose=verbose,
+        progress_every=progress_every,
+        label="three_peaks",
     )
     save_csv(out / f"{prefix}_initial_decisions.csv", ["x1", "x2", "x3"], res.X0)
     save_csv(out / f"{prefix}_final_decisions.csv", ["x1", "x2", "x3"], res.Xf)
@@ -661,7 +676,7 @@ def run_three_peaks(prefix="three_peaks", outdir=".", seed=8, n_points=15, max_i
     }
 
 
-def run_crashworthiness(prefix="vehicle_crashworthiness", outdir=".", seed=9, n_points=15, max_iter=24):
+def run_crashworthiness(prefix="vehicle_crashworthiness", outdir=".", seed=9, n_points=15, max_iter=24, verbose=True, progress_every=1):
     out = Path(outdir)
     out.mkdir(parents=True, exist_ok=True)
     rng = np.random.default_rng(seed)
@@ -681,6 +696,9 @@ def run_crashworthiness(prefix="vehicle_crashworthiness", outdir=".", seed=9, n_
         tau=5e-4,
         shrink=0.96,
         max_retries=8,
+        verbose=verbose,
+        progress_every=progress_every,
+        label="vehicle_crashworthiness",
     )
     save_csv(out / f"{prefix}_initial_decisions.csv", [f"x{i}" for i in range(1, 6)], res.X0)
     save_csv(out / f"{prefix}_final_decisions.csv", [f"x{i}" for i in range(1, 6)], res.Xf)
@@ -712,33 +730,6 @@ def run_crashworthiness(prefix="vehicle_crashworthiness", outdir=".", seed=9, n_
     }
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--problem", choices=["three_peaks", "vehicle_crashworthiness", "both"], default="both")
-    ap.add_argument("--outdir", default=".")
-    ap.add_argument("--seed", type=int, default=8)
-    ap.add_argument("--n-points", type=int, default=15)
-    ap.add_argument("--three-peaks-iters", type=int, default=48)
-    ap.add_argument("--crash-iters", type=int, default=24)
-    args = ap.parse_args()
-    summaries = {}
-    if args.problem in ("three_peaks", "both"):
-        summaries["three_peaks"] = run_three_peaks(outdir=args.outdir, seed=args.seed, n_points=args.n_points, max_iter=args.three_peaks_iters)
-    if args.problem in ("vehicle_crashworthiness", "both"):
-        summaries["vehicle_crashworthiness"] = run_crashworthiness(outdir=args.outdir, seed=args.seed + 1, n_points=args.n_points, max_iter=args.crash_iters)
-    with open(Path(args.outdir) / "benchmark_summary.json", "w") as f:
-        json.dump(summaries, f, indent=2)
-    print(json.dumps(summaries, indent=2))
-
-
-if __name__ == "__main__":
-    main()
-
-import argparse
-import json
-from pathlib import Path
-
-
 def report(name: str, s: dict) -> None:
     print(name)
     print(f"  iterations: {s['iterations']}")
@@ -751,26 +742,43 @@ def report(name: str, s: dict) -> None:
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Run the 3D layered-magnitude examples and print a concise summary.")
+    ap = argparse.ArgumentParser(description="Run the 3D layered-magnitude examples and print progress and a concise summary.")
     ap.add_argument("--problem", choices=["three_peaks", "vehicle_crashworthiness", "both"], default="both")
     ap.add_argument("--outdir", default=".", help="Directory for PNG/CSV output files.")
     ap.add_argument("--three-peaks-iters", type=int, default=48)
     ap.add_argument("--crash-iters", type=int, default=24)
     ap.add_argument("--n-points", type=int, default=15)
     ap.add_argument("--seed", type=int, default=8)
+    ap.add_argument("--progress-every", type=int, default=1, help="Print progress every k iterations.")
+    ap.add_argument("--quiet", action="store_true", help="Suppress intermediate iteration output.")
     args = ap.parse_args()
 
     outdir = Path(args.outdir)
     outdir.mkdir(parents=True, exist_ok=True)
     summaries = {}
+    verbose = not args.quiet
 
     if args.problem in ("three_peaks", "both"):
-        s = run_three_peaks(outdir=str(outdir), max_iter=args.three_peaks_iters, n_points=args.n_points, seed=args.seed)
+        s = run_three_peaks(
+            outdir=str(outdir),
+            max_iter=args.three_peaks_iters,
+            n_points=args.n_points,
+            seed=args.seed,
+            verbose=verbose,
+            progress_every=args.progress_every,
+        )
         summaries["three_peaks"] = s
         report("three_peaks", s)
 
     if args.problem in ("vehicle_crashworthiness", "both"):
-        s = run_crashworthiness(outdir=str(outdir), max_iter=args.crash_iters, n_points=args.n_points, seed=args.seed + 1)
+        s = run_crashworthiness(
+            outdir=str(outdir),
+            max_iter=args.crash_iters,
+            n_points=args.n_points,
+            seed=args.seed + 1,
+            verbose=verbose,
+            progress_every=args.progress_every,
+        )
         summaries["vehicle_crashworthiness"] = s
         report("vehicle_crashworthiness", s)
 
