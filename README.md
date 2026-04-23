@@ -1,15 +1,21 @@
-# Layered Magnitude 3D Single-File Runner
+# Layered Magnitude / Hypervolume 3D Runner
 
-This repository contains a single self-contained Python script for running a Clarke-motivated layered-magnitude ascent method on two three-objective benchmark problems:
+This repository contains a single self-contained Python script for running a Clarke-motivated projected ascent method on three-objective benchmark problems.
 
-- `three_peaks` — a synthetic 3-objective warm-up problem
-- `vehicle_crashworthiness` — a 3-objective engineering benchmark
+Current script:
 
-The script uses an exact 3D magnitude / hypervolume engine and can write PNG and CSV files for the benchmark runs.
+- `layered_magnitude_3d_singlefile_bulged_hv_recovery.py`
 
-## File
+## Features
 
-- `layered_magnitude_3d_singlefile.py`
+- layered **magnitude** indicator gradients
+- layered **hypervolume** indicator gradients
+- exact small-front mode
+- sweep-based large-front mode
+- adjustable **bulge** parameter for the bulged three-peaks benchmark
+- progress output during optimization
+- step-size **recovery from stagnation**
+- PNG and CSV outputs
 
 ## Requirements
 
@@ -18,7 +24,7 @@ Python 3 with:
 - `numpy`
 - `matplotlib`
 
-Install them with:
+Install with:
 
 ```bash
 python -m pip install numpy matplotlib
@@ -26,141 +32,186 @@ python -m pip install numpy matplotlib
 
 ## Quick start
 
-Run both examples:
+Run the bulged three-peaks benchmark with magnitude gradients:
 
 ```bash
-python layered_magnitude_3d_singlefile.py
+python layered_magnitude_3d_singlefile_bulged_hv_recovery.py \
+  --problem bulged_three_peaks \
+  --n-points 15 \
+  --three-peaks-iters 200 \
+  --bulge-gamma 0.25 \
+  --indicator magnitude \
+  --progress-every 10
 ```
 
-Run only the three-peaks example:
+Run the same benchmark with hypervolume gradients:
 
 ```bash
-python layered_magnitude_3d_singlefile.py --problem three_peaks
+python layered_magnitude_3d_singlefile_bulged_hv_recovery.py \
+  --problem bulged_three_peaks \
+  --n-points 15 \
+  --three-peaks-iters 200 \
+  --bulge-gamma 0.25 \
+  --indicator hypervolume \
+  --progress-every 10
 ```
 
-Run only the crashworthiness example:
+Run the original three-peaks benchmark:
 
 ```bash
-python layered_magnitude_3d_singlefile.py --problem vehicle_crashworthiness
+python layered_magnitude_3d_singlefile_bulged_hv_recovery.py \
+  --problem three_peaks \
+  --n-points 15 \
+  --three-peaks-iters 200 \
+  --indicator magnitude
 ```
 
-## Useful options
-
-Set the output directory:
+Run crashworthiness:
 
 ```bash
-python layered_magnitude_3d_singlefile.py --outdir results
+python layered_magnitude_3d_singlefile_bulged_hv_recovery.py \
+  --problem vehicle_crashworthiness \
+  --n-points 15 \
+  --crash-iters 96 \
+  --indicator magnitude
 ```
 
-Change the number of points:
+## Problems
 
-```bash
-python layered_magnitude_3d_singlefile.py --n-points 15
+### 1. `three_peaks`
+
+Synthetic three-objective benchmark with peaks at the unit vectors.
+
+### 2. `bulged_three_peaks`
+
+A simplex-constrained benchmark with adjustable bulge parameter `gamma`:
+
+```text
+f_i(x) = 1 - (||x - e_i||_2^2 / 2)^gamma,   i = 1,2,3
 ```
 
-Set the iteration budgets:
-
-```bash
-python layered_magnitude_3d_singlefile.py --three-peaks-iters 48 --crash-iters 24
-```
-
-Example:
-
-```bash
-python layered_magnitude_3d_singlefile.py --problem both --outdir results --three-peaks-iters 48 --crash-iters 24
-```
-
-## What the script prints
-
-For each benchmark, the script reports:
-
-- iteration count
-- initial layered magnitude
-- final layered magnitude
-- accepted steps
-- final step size
-- nondominated count change
-- IGD change
-
-This makes it easy to monitor progress from the terminal without opening the output files first.
-
-## Output files
-
-The script writes files such as:
-
-### Three-peaks
-- `three_peaks_objective_space.png`
-- `three_peaks_decision_space.png`
-- `three_peaks_convergence.png`
-- `three_peaks_initial_decisions.csv`
-- `three_peaks_final_decisions.csv`
-- `three_peaks_initial_objectives.csv`
-- `three_peaks_final_objectives.csv`
-- `three_peaks_reference_archive.csv`
-- `three_peaks_history.csv`
-
-### Vehicle crashworthiness
-- `vehicle_crashworthiness_objective_space.png`
-- `vehicle_crashworthiness_convergence.png`
-- `vehicle_crashworthiness_initial_decisions.csv`
-- `vehicle_crashworthiness_final_decisions.csv`
-- `vehicle_crashworthiness_initial_objectives.csv`
-- `vehicle_crashworthiness_final_objectives.csv`
-- `vehicle_crashworthiness_initial_objectives_raw.csv`
-- `vehicle_crashworthiness_final_objectives_raw.csv`
-- `vehicle_crashworthiness_reference_archive.csv`
-- `vehicle_crashworthiness_history.csv`
-
-The script also writes:
-
-- `benchmark_summary.json`
-
-## Benchmarks
-
-### 1. Three-peaks problem
-
-The synthetic warm-up benchmark is defined by
-
-    f_i(x) = 1 - ||x - e_i||_2,    i = 1,2,3
-
-where
+where:
 
 - `e1 = (1,0,0)`
 - `e2 = (0,1,0)`
 - `e3 = (0,0,1)`
 
-and
+and `x` is projected onto the simplex.
 
-- `x in [-2,2]^3`
+Smaller `gamma` gives a stronger bulge toward `(1,1,1)` in objective space.
 
-The approximation points are initialized near the origin.
+### 3. `vehicle_crashworthiness`
 
-### 2. Vehicle crashworthiness
+Three-objective engineering benchmark with five decision variables and box constraints.
 
-The crashworthiness benchmark is a standard 3-objective engineering problem with 5 decision variables and box constraints. The script transforms the original minimization objectives into a bounded maximization space before applying the layered-magnitude ascent method.
+## Indicator option
 
-## Clarke-motivated: what it means here
+Use:
 
-The method is Clarke-motivated in a practical sense:
+- `--indicator magnitude`
+- `--indicator hypervolume`
 
-- on chambers with fixed layer structure, the exact magnitude engine provides an objective-space tie-shared subgradient;
+For `magnitude`, the 3D quantity includes:
+
+- edge / axis terms
+- face / projected-area terms
+- volume / hypervolume term
+
+For `hypervolume`, only the hypervolume part is optimized.
+
+## Exact and switched modes
+
+The code uses two regimes:
+
+- **exact mode** for small first-front sizes
+- **sweep-based mode** for larger first fronts
+
+The switching threshold is controlled by:
+
+```bash
+--exact-front-threshold 10
+```
+
+## Progress output
+
+The script prints intermediate progress such as:
+
+- current iteration
+- current objective value
+- current step size
+- nondominated count
+- layer sizes
+- mode used
+- retry count
+- whether the step was accepted or stalled
+
+Control the print frequency with:
+
+```bash
+--progress-every 10
+```
+
+Silence progress output with:
+
+```bash
+--quiet
+```
+
+## Step-size recovery
+
+The line search uses a reduction factor of `0.99`.
+
+If the step size becomes too small and the run stagnates for a while, the code attempts a controlled increase of the step size again. This is intended to help the method recover from long stagnation phases near the alpha floor.
+
+## Output files
+
+The script writes files such as:
+
+- `*_objective_space.png`
+- `*_decision_space.png` (for three-peaks variants)
+- `*_convergence.png`
+- `*_initial_decisions.csv`
+- `*_final_decisions.csv`
+- `*_initial_objectives.csv`
+- `*_final_objectives.csv`
+- `*_reference_archive.csv`
+- `*_history.csv`
+- `benchmark_summary.json`
+
+## Examples
+
+Bulged front with stronger bend:
+
+```bash
+python layered_magnitude_3d_singlefile_bulged_hv_recovery.py \
+  --problem bulged_three_peaks \
+  --bulge-gamma 0.25 \
+  --indicator magnitude
+```
+
+Hypervolume-driven run:
+
+```bash
+python layered_magnitude_3d_singlefile_bulged_hv_recovery.py \
+  --problem bulged_three_peaks \
+  --bulge-gamma 0.25 \
+  --indicator hypervolume
+```
+
+## Clarke-motivated
+
+The method is Clarke-motivated in the following practical sense:
+
+- on chambers with fixed layer structure, the code uses exact or sweep-based indicator gradients;
 - at layer switches, the hard-layer objective is nonsmooth;
-- the implemented method should therefore be interpreted as a practical ascent scheme guided by generalized-gradient ideas, rather than as a full Clarke-subgradient method with convergence guarantees.
+- the implemented method is therefore a practical projected ascent scheme guided by generalized-gradient ideas, rather than a full Clarke-subgradient method with convergence guarantees.
 
 ## Notes
 
-- The exact 3D magnitude engine is intended for small to medium-sized point sets.
-- Longer runs can become computationally expensive because exact 3D inclusion-exclusion is costly.
-- The default settings are chosen to be useful while still remaining reasonably runnable.
-
-## Suggested citation text
-
-If you use this code in connection with the manuscript, cite the corresponding paper and mention that the repository contains a single-file reference implementation of the 3-objective layered-magnitude ascent method.
+- exact 3D computations are intended for small or moderate front sizes
+- larger fronts use a switched sweep-based regime
+- longer runs can still become expensive, especially for denser fronts
 
 ## License
 
-Add your preferred license here, for example:
-
-- MIT
-- BSD-3-Clause
-- GPL-3.0-only
+Add your preferred license here.
