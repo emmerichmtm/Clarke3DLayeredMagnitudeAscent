@@ -852,6 +852,66 @@ def run_bulged_three_peaks(prefix='bulged_three_peaks', outdir='.', seed=8, n_po
     return summary
 
 
+
+
+def bulged_three_peaks_box_objective(X: Array, gamma: float = 0.5) -> Array:
+    E = np.eye(3)
+    Y = np.zeros((len(X), 3), dtype=float)
+    for i, e in enumerate(E):
+        d2 = np.sum((X - e) ** 2, axis=1)
+        t = np.clip(d2 / 2.0, 0.0, 1.0)
+        Y[:, i] = 1.0 - np.power(t, gamma)
+    return Y
+
+
+def bulged_three_peaks_box_jacobian(X: Array, gamma: float = 0.5) -> Array:
+    E = np.eye(3)
+    J = np.zeros((len(X), 3, 3), dtype=float)
+    for i, e in enumerate(E):
+        diff = X - e
+        d2 = np.sum(diff ** 2, axis=1)
+        t = d2 / 2.0
+        coeff = np.zeros(len(X), dtype=float)
+        mask = (t > 1e-12) & (t < 1.0)
+        coeff[mask] = -gamma * np.power(t[mask], gamma - 1.0)
+        J[:, i, :] = coeff[:, None] * diff
+    return J
+
+
+def run_bulged_three_peaks_box(prefix='bulged_three_peaks_box', outdir='.', seed=8, n_points=15, max_iter=200, gamma=0.5, exact_front_threshold=10, progress_every=10, quiet=False, indicator='magnitude', initialization='random', dd_h=3, dd_sigma=0.01, move='gradient'):
+    out = Path(outdir)
+    out.mkdir(parents=True, exist_ok=True)
+    rng = np.random.default_rng(seed)
+    if initialization == 'dasdenis':
+        X0 = project_box(das_denis_points_3obj(dd_h) + rng.normal(0.0, dd_sigma, size=das_denis_points_3obj(dd_h).shape), -2.0, 2.0)
+        effective_n_points = len(X0)
+    else:
+        X0 = np.clip(rng.normal(0.0, 0.06, size=(n_points, 3)), -2.0, 2.0)
+        effective_n_points = n_points
+    suffix = make_setting_suffix('bulged_three_peaks_box', seed=seed, n_points=effective_n_points, three_peaks_iters=max_iter, exact_front_threshold=exact_front_threshold, bulge_gamma=gamma, indicator=indicator, initialization=initialization, dd_h=dd_h, dd_sigma=dd_sigma, move=move)
+    base = prefix + suffix
+    projector = lambda X: project_box(X, -2.0, 2.0)
+    anchor = (0.0, 0.0, 0.0)
+    obj = lambda X: bulged_three_peaks_box_objective(X, gamma=gamma)
+    jac = lambda X: bulged_three_peaks_box_jacobian(X, gamma=gamma)
+    ref = approx_reference(obj, projector, 3, -2.0, 2.0, 1200, np.random.default_rng(seed + 100))
+    if move == 'gradient':
+        res = run_projected_ascent(obj, jac, projector, X0, anchor, alpha0=0.05, max_iter=max_iter, sigma=0.08, tau=5e-4, shrink=0.99, max_retries=8, alpha_floor=1e-4, stall_limit=30, exact_front_threshold=exact_front_threshold, progress_every=progress_every, quiet=quiet, indicator=indicator)
+    else:
+        res = run_stochastic_hillclimb(obj, projector, X0, anchor, rng=np.random.default_rng(seed + 1000), alpha0=0.05, max_iter=max_iter, sigma=0.08, tau=5e-4, shrink=0.99, max_retries=8, alpha_floor=1e-4, stall_limit=30, exact_front_threshold=exact_front_threshold, progress_every=progress_every, quiet=quiet, indicator=indicator)
+    save_csv(out / f'{base}_initial_decisions.csv', ['x1', 'x2', 'x3'], res.X0)
+    save_csv(out / f'{base}_final_decisions.csv', ['x1', 'x2', 'x3'], res.Xf)
+    save_csv(out / f'{base}_initial_objectives.csv', ['f1', 'f2', 'f3'], res.Y0)
+    save_csv(out / f'{base}_final_objectives.csv', ['f1', 'f2', 'f3'], res.Yf)
+    save_csv(out / f'{base}_reference_archive.csv', ['f1', 'f2', 'f3'], ref)
+    save_csv(out / f'{base}_history.csv', ['iteration', 'layered_value', 'alpha'], zip(range(len(res.values)), res.values, res.alphas))
+    plot_objective_space(out / f'{base}_objective_space.png', res.Y0, res.Yf, ref, f'Bulged three-peaks box benchmark (objective space, gamma={gamma:g})')
+    plot_three_peaks_decision_space(out / f'{base}_decision_space.png', res.X0, res.Xf, f'Bulged three-peaks box benchmark (decision space, gamma={gamma:g})')
+    plot_convergence(out / f'{base}_convergence.png', res.values, res.alphas, f'Bulged three-peaks box convergence (gamma={gamma:g})', stride=4)
+    summary = summarize_result('bulged_three_peaks_box', res, ref)
+    summary['gamma'] = float(gamma)
+    return summary
+
 def crashworthiness_raw_objective(X: Array) -> Array:
     x1, x2, x3, x4, x5 = [X[:, i] for i in range(5)]
     f1 = 1640.2823 + 2.3573285 * x1 + 2.3220035 * x2 + 4.5688768 * x3 + 7.7213633 * x4 + 4.4559504 * x5
@@ -1027,7 +1087,7 @@ def run_self_test(n_cases: int = 8, seed: int = 123) -> dict:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--problem', choices=['three_peaks', 'bulged_three_peaks', 'vehicle_crashworthiness', 'both'], default='bulged_three_peaks')
+    ap.add_argument('--problem', choices=['three_peaks', 'bulged_three_peaks', 'bulged_three_peaks_box', 'vehicle_crashworthiness', 'both'], default='bulged_three_peaks')
     ap.add_argument('--outdir', default='.')
     ap.add_argument('--seed', type=int, default=8)
     ap.add_argument('--n-points', type=int, default=15)
@@ -1060,6 +1120,8 @@ def main():
         summaries['three_peaks'] = run_three_peaks(outdir=args.outdir, seed=args.seed, n_points=args.n_points, max_iter=args.three_peaks_iters, exact_front_threshold=args.exact_front_threshold, progress_every=args.progress_every, quiet=args.quiet, indicator=args.indicator, move=args.move)
     if args.problem in ('bulged_three_peaks', 'both'):
         summaries['bulged_three_peaks'] = run_bulged_three_peaks(outdir=args.outdir, seed=args.seed, n_points=args.n_points, max_iter=args.three_peaks_iters, gamma=args.bulge_gamma, exact_front_threshold=args.exact_front_threshold, progress_every=args.progress_every, quiet=args.quiet, indicator=args.indicator, initialization=args.initialization, dd_h=args.dd_h, dd_sigma=args.dd_sigma, move=args.move)
+    if args.problem in ('bulged_three_peaks_box', 'both'):
+        summaries['bulged_three_peaks_box'] = run_bulged_three_peaks_box(outdir=args.outdir, seed=args.seed, n_points=args.n_points, max_iter=args.three_peaks_iters, gamma=args.bulge_gamma, exact_front_threshold=args.exact_front_threshold, progress_every=args.progress_every, quiet=args.quiet, indicator=args.indicator, initialization=args.initialization, dd_h=args.dd_h, dd_sigma=args.dd_sigma, move=args.move)
     if args.problem in ('vehicle_crashworthiness', 'both'):
         summaries['vehicle_crashworthiness'] = run_crashworthiness(outdir=args.outdir, seed=args.seed + 1, n_points=args.n_points, max_iter=args.crash_iters, exact_front_threshold=args.exact_front_threshold, progress_every=args.progress_every, quiet=args.quiet, indicator=args.indicator, move=args.move)
     out = Path(args.outdir)
