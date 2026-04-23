@@ -584,6 +584,31 @@ def sample_simplex(rng: np.random.Generator, n: int, dim: int = 3) -> Array:
     return rng.dirichlet(np.ones(dim), size=n)
 
 
+def das_dennis_simplex_grid_3d(H: int) -> Array:
+    if H < 1:
+        raise ValueError('dd_h must be >= 1')
+    pts = []
+    for a in range(H + 1):
+        for b in range(H + 1 - a):
+            c = H - a - b
+            pts.append((a / H, b / H, c / H))
+    return np.array(pts, dtype=float)
+
+
+def perturb_and_reproject_simplex(X: Array, rng: np.random.Generator, sigma: float) -> Array:
+    if sigma <= 0:
+        return np.array(X, dtype=float, copy=True)
+    Y = np.asarray(X, dtype=float) + rng.normal(0.0, sigma, size=np.asarray(X).shape)
+    return project_simplex_rows(Y)
+
+
+def make_simplex_initial_points(rng: np.random.Generator, init_mode: str = 'random', n_points: int = 15, dd_h: int = 3, dd_sigma: float = 0.01) -> Array:
+    if init_mode == 'dasdenis':
+        X0 = das_dennis_simplex_grid_3d(dd_h)
+        return perturb_and_reproject_simplex(X0, rng, dd_sigma)
+    return sample_simplex(rng, n_points, 3)
+
+
 def bulged_three_peaks_objective(X: Array, gamma: float = 0.5) -> Array:
     E = np.eye(3)
     Y = np.zeros((len(X), 3), dtype=float)
@@ -613,11 +638,68 @@ def approx_reference_simplex(objective_fn, samples: int, rng: np.random.Generato
     return nondominated_subset(objective_fn(X))
 
 
-def run_bulged_three_peaks(prefix='bulged_three_peaks', outdir='.', seed=8, n_points=15, max_iter=200, gamma=0.5, exact_front_threshold=10, progress_every=10, quiet=False, indicator='magnitude'):
+DEFAULT_RUN_SETTINGS = {
+    'seed': 8,
+    'n_points': 15,
+    'three_peaks_iters': 200,
+    'crash_iters': 96,
+    'exact_front_threshold': 10,
+    'progress_every': 10,
+    'bulge_gamma': 0.5,
+    'indicator': 'magnitude',
+    'initialization': 'random',
+    'dd_h': 3,
+    'dd_sigma': 0.01,
+}
+
+OPTION_TAGS = {
+    'seed': 'se',
+    'n_points': 'np',
+    'three_peaks_iters': 'tp',
+    'crash_iters': 'cr',
+    'exact_front_threshold': 'ex',
+    'bulge_gamma': 'bu',
+    'indicator': 'in',
+    'initialization': 'ii',
+    'dd_h': 'dh',
+    'dd_sigma': 'ds',
+}
+
+
+def _fmt_tag_value(val):
+    if isinstance(val, bool):
+        return '1' if val else '0'
+    if isinstance(val, float):
+        s = f"{val:g}".replace('-', 'm').replace('.', 'p')
+        return s
+    return str(val).replace('-', 'm').replace('.', 'p')
+
+
+def make_setting_suffix(problem: str, **settings) -> str:
+    # only include settings that differ from defaults; keep filenames short and reproducible
+    parts = []
+    for key in ['seed', 'n_points', 'three_peaks_iters', 'crash_iters', 'exact_front_threshold', 'bulge_gamma', 'indicator', 'initialization', 'dd_h', 'dd_sigma']:
+        if key not in settings:
+            continue
+        default = DEFAULT_RUN_SETTINGS.get(key, None)
+        val = settings[key]
+        if val != default:
+            parts.append(f"{OPTION_TAGS[key]}{_fmt_tag_value(val)}")
+    return ("_" + "_".join(parts)) if parts else ""
+
+
+def attach_suffix(prefix: str, suffix: str) -> str:
+    return prefix + suffix if suffix else prefix
+
+
+def run_bulged_three_peaks(prefix='bulged_three_peaks', outdir='.', seed=8, n_points=15, max_iter=200, gamma=0.5, exact_front_threshold=10, progress_every=10, quiet=False, indicator='magnitude', initialization='random', dd_h=3, dd_sigma=0.01):
     out = Path(outdir)
     out.mkdir(parents=True, exist_ok=True)
+    effective_n_points = int((dd_h + 1) * (dd_h + 2) / 2) if initialization == 'dasdenis' else n_points
+    suffix = make_setting_suffix('bulged_three_peaks', seed=seed, n_points=effective_n_points, three_peaks_iters=max_iter, exact_front_threshold=exact_front_threshold, bulge_gamma=gamma, indicator=indicator, initialization=initialization, dd_h=dd_h, dd_sigma=dd_sigma)
+    prefix = attach_suffix(prefix, suffix)
     rng = np.random.default_rng(seed)
-    X0 = sample_simplex(rng, n_points, 3)
+    X0 = make_simplex_initial_points(rng, init_mode=initialization, n_points=n_points, dd_h=dd_h, dd_sigma=dd_sigma)
     projector = project_simplex_rows
     anchor = (0.0, 0.0, 0.0)
     obj = lambda X: bulged_three_peaks_objective(X, gamma=gamma)
@@ -636,6 +718,11 @@ def run_bulged_three_peaks(prefix='bulged_three_peaks', outdir='.', seed=8, n_po
     summary = summarize_result('bulged_three_peaks', res, ref)
     summary['gamma'] = float(gamma)
     summary['indicator'] = indicator
+    summary['initialization'] = initialization
+    if initialization == 'dasdenis':
+        summary['dd_h'] = int(dd_h)
+        summary['dd_sigma'] = float(dd_sigma)
+        summary['n_points_effective'] = int((dd_h + 1) * (dd_h + 2) / 2)
     return summary
 
 
@@ -708,6 +795,8 @@ def summarize_result(name: str, res: RunResult, ref: Array) -> dict:
 def run_three_peaks(prefix='three_peaks', outdir='.', seed=8, n_points=15, max_iter=200, exact_front_threshold=10, progress_every=10, quiet=False, indicator='magnitude'):
     out = Path(outdir)
     out.mkdir(parents=True, exist_ok=True)
+    suffix = make_setting_suffix('three_peaks', seed=seed, n_points=n_points, three_peaks_iters=max_iter, exact_front_threshold=exact_front_threshold, indicator=indicator)
+    prefix = attach_suffix(prefix, suffix)
     rng = np.random.default_rng(seed)
     X0 = np.clip(rng.normal(0.0, 0.06, size=(n_points, 3)), -2.0, 2.0)
     projector = lambda X: project_box(X, -2.0, 2.0)
@@ -725,12 +814,19 @@ def run_three_peaks(prefix='three_peaks', outdir='.', seed=8, n_points=15, max_i
     plot_convergence(out / f'{prefix}_convergence.png', res.values, res.alphas, 'Three-peaks convergence', stride=4)
     summary = summarize_result('three_peaks', res, ref)
     summary['indicator'] = indicator
+    summary['initialization'] = initialization
+    if initialization == 'dasdenis':
+        summary['dd_h'] = int(dd_h)
+        summary['dd_sigma'] = float(dd_sigma)
+        summary['n_points_effective'] = int((dd_h + 1) * (dd_h + 2) / 2)
     return summary
 
 
 def run_crashworthiness(prefix='vehicle_crashworthiness', outdir='.', seed=9, n_points=15, max_iter=96, exact_front_threshold=10, progress_every=10, quiet=False, indicator='magnitude'):
     out = Path(outdir)
     out.mkdir(parents=True, exist_ok=True)
+    suffix = make_setting_suffix('vehicle_crashworthiness', seed=seed, n_points=n_points, crash_iters=max_iter, exact_front_threshold=exact_front_threshold, indicator=indicator)
+    prefix = attach_suffix(prefix, suffix)
     rng = np.random.default_rng(seed)
     obj, jac, meta = make_crash_transform(seed + 50, 500)
     projector = lambda X: project_box(X, 1.0, 3.0)
@@ -750,6 +846,11 @@ def run_crashworthiness(prefix='vehicle_crashworthiness', outdir='.', seed=9, n_
     summary = summarize_result('vehicle_crashworthiness', res, ref)
     summary['normalization'] = meta
     summary['indicator'] = indicator
+    summary['initialization'] = initialization
+    if initialization == 'dasdenis':
+        summary['dd_h'] = int(dd_h)
+        summary['dd_sigma'] = float(dd_sigma)
+        summary['n_points_effective'] = int((dd_h + 1) * (dd_h + 2) / 2)
     return summary
 
 
@@ -800,6 +901,9 @@ def main():
     ap.add_argument('--self-test', action='store_true')
     ap.add_argument('--bulge-gamma', type=float, default=0.5)
     ap.add_argument('--indicator', choices=['magnitude', 'hypervolume'], default='magnitude')
+    ap.add_argument('--initialization', choices=['random', 'dasdenis'], default='random')
+    ap.add_argument('--dd-h', type=int, default=3)
+    ap.add_argument('--dd-sigma', type=float, default=0.01)
     args = ap.parse_args()
 
     if args.self_test:
@@ -816,13 +920,17 @@ def main():
     if args.problem in ('three_peaks', 'both'):
         summaries['three_peaks'] = run_three_peaks(outdir=args.outdir, seed=args.seed, n_points=args.n_points, max_iter=args.three_peaks_iters, exact_front_threshold=args.exact_front_threshold, progress_every=args.progress_every, quiet=args.quiet, indicator=args.indicator)
     if args.problem in ('bulged_three_peaks', 'both'):
-        summaries['bulged_three_peaks'] = run_bulged_three_peaks(outdir=args.outdir, seed=args.seed, n_points=args.n_points, max_iter=args.three_peaks_iters, gamma=args.bulge_gamma, exact_front_threshold=args.exact_front_threshold, progress_every=args.progress_every, quiet=args.quiet, indicator=args.indicator)
+        summaries['bulged_three_peaks'] = run_bulged_three_peaks(outdir=args.outdir, seed=args.seed, n_points=args.n_points, max_iter=args.three_peaks_iters, gamma=args.bulge_gamma, exact_front_threshold=args.exact_front_threshold, progress_every=args.progress_every, quiet=args.quiet, indicator=args.indicator, initialization=args.initialization, dd_h=args.dd_h, dd_sigma=args.dd_sigma)
     if args.problem in ('vehicle_crashworthiness', 'both'):
         summaries['vehicle_crashworthiness'] = run_crashworthiness(outdir=args.outdir, seed=args.seed + 1, n_points=args.n_points, max_iter=args.crash_iters, exact_front_threshold=args.exact_front_threshold, progress_every=args.progress_every, quiet=args.quiet, indicator=args.indicator)
     out = Path(args.outdir)
     out.mkdir(parents=True, exist_ok=True)
+    summary_suffix = make_setting_suffix(args.problem, seed=args.seed, n_points=args.n_points, three_peaks_iters=args.three_peaks_iters, crash_iters=args.crash_iters, exact_front_threshold=args.exact_front_threshold, bulge_gamma=args.bulge_gamma, indicator=args.indicator)
     with open(out / 'benchmark_summary.json', 'w') as f:
         json.dump(summaries, f, indent=2)
+    if summary_suffix:
+        with open(out / f'benchmark_summary{summary_suffix}.json', 'w') as f:
+            json.dump(summaries, f, indent=2)
     print(json.dumps(summaries, indent=2))
 
 
