@@ -357,6 +357,36 @@ def indicator_value_and_gradient_front(points, anchor, indicator='magnitude', ex
         raise ValueError(f'unknown indicator: {indicator}')
 
 
+def indicator_value_front(points, anchor, indicator='magnitude', exact_front_threshold: int = 10):
+    if indicator == 'magnitude':
+        if len(points) <= exact_front_threshold:
+            return magnitude_3d_max_exact(points, anchor=anchor), 'exact-mag'
+        else:
+            return magnitude_3d_max_sweep_forward(points, anchor=anchor), 'sweep-mag'
+    elif indicator == 'hypervolume':
+        if len(points) <= exact_front_threshold:
+            return hypervolume_3d_max_exact(points, anchor=anchor), 'exact-hv'
+        else:
+            return hypervolume_3d_max_sweep_forward(points, anchor=anchor), 'sweep-hv'
+    else:
+        raise ValueError(f'unknown indicator: {indicator}')
+
+
+def layered_value_obj(Y: Array, anchor: Sequence[float], eps_layer: float, tau: float, sigma: float, exact_front_threshold: int = 10, indicator: str = 'magnitude'):
+    value = 0.0
+    layers = nondomination_layers(Y)
+    modes = []
+    for ell, front in enumerate(layers):
+        w = eps_layer ** ell
+        pts = Y[front]
+        vfront, mode = indicator_value_front(pts, anchor, indicator=indicator, exact_front_threshold=exact_front_threshold)
+        value += w * vfront
+        modes.append(mode)
+    if tau > 0:
+        value -= tau * repulsion_value(Y, sigma)
+    return float(value), layers, modes
+
+
 def layered_value_and_gradient_obj(Y: Array, anchor: Sequence[float], eps_layer: float, tau: float, sigma: float, exact_front_threshold: int = 10, indicator: str = 'magnitude'):
     value = 0.0
     G = np.zeros_like(Y)
@@ -546,6 +576,94 @@ def run_projected_ascent(
     return RunResult(Xinit, Yinit, X, Y, values, alphas, accepted_steps, completed)
 
 
+def run_stochastic_hillclimb(
+    objective_fn,
+    projector,
+    X0,
+    anchor,
+    rng,
+    eps_layer=1e-3,
+    tau=5e-4,
+    sigma=0.03,
+    alpha0=0.05,
+    max_iter=200,
+    shrink=0.99,
+    max_retries=8,
+    alpha_floor=1e-4,
+    stall_limit=30,
+    exact_front_threshold=10,
+    progress_every=10,
+    quiet=False,
+    indicator='magnitude',
+    recovery_patience=8,
+    recovery_boost=2.5,
+    recovery_cap=0.02,
+):
+    X = projector(np.asarray(X0, float).copy())
+    Y = objective_fn(X)
+    val, layers, modes = layered_value_obj(Y, anchor, eps_layer, tau, sigma, exact_front_threshold=exact_front_threshold, indicator=indicator)
+    values = [val]
+    alphas = [alpha0]
+    alpha = float(alpha0)
+    accepted_steps = 0
+    consecutive_stalls = 0
+    Xinit = X.copy()
+    Yinit = Y.copy()
+    if not quiet:
+        print(f"iter=0/{max_iter} value={val:.10f} alpha={alpha:.6g} nd={len(layers[0]) if layers else 0} layer_sizes={[len(fr) for fr in layers[:5]]} modes={'+'.join(modes[:5])} move=stochastic")
+    completed = 0
+    for it in range(1, max_iter + 1):
+        trial_alpha = alpha
+        accepted = False
+        retries_used = 0
+        for _k in range(max_retries + 1):
+            trial_alpha = max(trial_alpha, alpha_floor)
+            idx = int(rng.integers(0, len(X)))
+            direction = rng.normal(size=X.shape[1])
+            nrm = float(np.linalg.norm(direction))
+            if nrm <= 1e-15:
+                direction[0] = 1.0
+                nrm = 1.0
+            direction /= nrm
+            Xt = np.array(X, copy=True)
+            Xt[idx] = Xt[idx] + trial_alpha * direction
+            Xt = projector(Xt)
+            Yt = objective_fn(Xt)
+            vt, layers_t, modes_t = layered_value_obj(Yt, anchor, eps_layer, tau, sigma, exact_front_threshold=exact_front_threshold, indicator=indicator)
+            if vt >= val - 1e-12:
+                X, Y, val, layers, modes = Xt, Yt, vt, layers_t, modes_t
+                alpha = trial_alpha
+                accepted_steps += 1
+                accepted = True
+                consecutive_stalls = 0
+                break
+            if trial_alpha <= alpha_floor + 1e-15:
+                break
+            trial_alpha *= shrink
+            retries_used += 1
+        recovered = False
+        if not accepted:
+            alpha = max(alpha_floor, trial_alpha)
+            consecutive_stalls += 1
+            if alpha <= alpha_floor + 1e-15 and consecutive_stalls >= recovery_patience:
+                new_alpha = min(recovery_cap, max(alpha_floor, recovery_boost * alpha))
+                if new_alpha > alpha + 1e-15:
+                    alpha = new_alpha
+                    consecutive_stalls = 0
+                    recovered = True
+        values.append(val)
+        alphas.append(alpha)
+        completed = it
+        if (not quiet) and (it % progress_every == 0 or it == max_iter or not accepted):
+            status = 'accepted' if accepted else ('recovered' if recovered else 'stalled')
+            print(f"iter={it}/{max_iter} value={val:.10f} alpha={alpha:.6g} nd={len(layers[0]) if layers else 0} layer_sizes={[len(fr) for fr in layers[:5]]} modes={'+'.join(modes[:5])} retries={retries_used} {status} accepted_steps={accepted_steps} move=stochastic")
+        if consecutive_stalls >= stall_limit:
+            if not quiet:
+                print(f"Stopping early after {consecutive_stalls} consecutive stalls at alpha floor {alpha_floor}.")
+            break
+    return RunResult(Xinit, Yinit, X, Y, values, alphas, accepted_steps, completed)
+
+
 # ---------------------------- benchmarks ----------------------------
 
 def three_peaks_objective(X: Array) -> Array:
@@ -650,6 +768,7 @@ DEFAULT_RUN_SETTINGS = {
     'initialization': 'random',
     'dd_h': 3,
     'dd_sigma': 0.01,
+    'move': 'gradient',
 }
 
 OPTION_TAGS = {
@@ -663,6 +782,7 @@ OPTION_TAGS = {
     'initialization': 'ii',
     'dd_h': 'dh',
     'dd_sigma': 'ds',
+    'move': 'mv',
 }
 
 
@@ -678,7 +798,7 @@ def _fmt_tag_value(val):
 def make_setting_suffix(problem: str, **settings) -> str:
     # only include settings that differ from defaults; keep filenames short and reproducible
     parts = []
-    for key in ['seed', 'n_points', 'three_peaks_iters', 'crash_iters', 'exact_front_threshold', 'bulge_gamma', 'indicator', 'initialization', 'dd_h', 'dd_sigma']:
+    for key in ['seed', 'n_points', 'three_peaks_iters', 'crash_iters', 'exact_front_threshold', 'bulge_gamma', 'indicator', 'initialization', 'dd_h', 'dd_sigma', 'move']:
         if key not in settings:
             continue
         default = DEFAULT_RUN_SETTINGS.get(key, None)
@@ -692,11 +812,11 @@ def attach_suffix(prefix: str, suffix: str) -> str:
     return prefix + suffix if suffix else prefix
 
 
-def run_bulged_three_peaks(prefix='bulged_three_peaks', outdir='.', seed=8, n_points=15, max_iter=200, gamma=0.5, exact_front_threshold=10, progress_every=10, quiet=False, indicator='magnitude', initialization='random', dd_h=3, dd_sigma=0.01):
+def run_bulged_three_peaks(prefix='bulged_three_peaks', outdir='.', seed=8, n_points=15, max_iter=200, gamma=0.5, exact_front_threshold=10, progress_every=10, quiet=False, indicator='magnitude', initialization='random', dd_h=3, dd_sigma=0.01, move='gradient'):
     out = Path(outdir)
     out.mkdir(parents=True, exist_ok=True)
     effective_n_points = int((dd_h + 1) * (dd_h + 2) / 2) if initialization == 'dasdenis' else n_points
-    suffix = make_setting_suffix('bulged_three_peaks', seed=seed, n_points=effective_n_points, three_peaks_iters=max_iter, exact_front_threshold=exact_front_threshold, bulge_gamma=gamma, indicator=indicator, initialization=initialization, dd_h=dd_h, dd_sigma=dd_sigma)
+    suffix = make_setting_suffix('bulged_three_peaks', seed=seed, n_points=effective_n_points, three_peaks_iters=max_iter, exact_front_threshold=exact_front_threshold, bulge_gamma=gamma, indicator=indicator, initialization=initialization, dd_h=dd_h, dd_sigma=dd_sigma, move=move)
     prefix = attach_suffix(prefix, suffix)
     rng = np.random.default_rng(seed)
     X0 = make_simplex_initial_points(rng, init_mode=initialization, n_points=n_points, dd_h=dd_h, dd_sigma=dd_sigma)
@@ -705,7 +825,12 @@ def run_bulged_three_peaks(prefix='bulged_three_peaks', outdir='.', seed=8, n_po
     obj = lambda X: bulged_three_peaks_objective(X, gamma=gamma)
     jac = lambda X: bulged_three_peaks_jacobian(X, gamma=gamma)
     ref = approx_reference_simplex(obj, 800, np.random.default_rng(seed + 100))
-    res = run_projected_ascent(obj, jac, projector, X0, anchor, alpha0=0.05, max_iter=max_iter, sigma=0.04, tau=5e-4, shrink=0.99, max_retries=8, alpha_floor=1e-4, stall_limit=30, exact_front_threshold=exact_front_threshold, progress_every=progress_every, quiet=quiet, indicator=indicator)
+    if move == 'gradient':
+        res = run_projected_ascent(obj, jac, projector, X0, anchor, alpha0=0.05, max_iter=max_iter, sigma=0.04, tau=5e-4, shrink=0.99, max_retries=8, alpha_floor=1e-4, stall_limit=30, exact_front_threshold=exact_front_threshold, progress_every=progress_every, quiet=quiet, indicator=indicator)
+    elif move == 'stochastic':
+        res = run_stochastic_hillclimb(obj, projector, X0, anchor, rng=np.random.default_rng(seed + 1000), alpha0=0.05, max_iter=max_iter, sigma=0.04, tau=5e-4, shrink=0.99, max_retries=8, alpha_floor=1e-4, stall_limit=30, exact_front_threshold=exact_front_threshold, progress_every=progress_every, quiet=quiet, indicator=indicator)
+    else:
+        raise ValueError(f'unknown move: {move}')
     save_csv(out / f'{prefix}_initial_decisions.csv', ['x1', 'x2', 'x3'], res.X0)
     save_csv(out / f'{prefix}_final_decisions.csv', ['x1', 'x2', 'x3'], res.Xf)
     save_csv(out / f'{prefix}_initial_objectives.csv', ['f1', 'f2', 'f3'], res.Y0)
@@ -719,6 +844,7 @@ def run_bulged_three_peaks(prefix='bulged_three_peaks', outdir='.', seed=8, n_po
     summary['gamma'] = float(gamma)
     summary['indicator'] = indicator
     summary['initialization'] = initialization
+    summary['move'] = move
     if initialization == 'dasdenis':
         summary['dd_h'] = int(dd_h)
         summary['dd_sigma'] = float(dd_sigma)
@@ -792,17 +918,22 @@ def summarize_result(name: str, res: RunResult, ref: Array) -> dict:
     }
 
 
-def run_three_peaks(prefix='three_peaks', outdir='.', seed=8, n_points=15, max_iter=200, exact_front_threshold=10, progress_every=10, quiet=False, indicator='magnitude'):
+def run_three_peaks(prefix='three_peaks', outdir='.', seed=8, n_points=15, max_iter=200, exact_front_threshold=10, progress_every=10, quiet=False, indicator='magnitude', move='gradient'):
     out = Path(outdir)
     out.mkdir(parents=True, exist_ok=True)
-    suffix = make_setting_suffix('three_peaks', seed=seed, n_points=n_points, three_peaks_iters=max_iter, exact_front_threshold=exact_front_threshold, indicator=indicator)
+    suffix = make_setting_suffix('three_peaks', seed=seed, n_points=n_points, three_peaks_iters=max_iter, exact_front_threshold=exact_front_threshold, indicator=indicator, move=move)
     prefix = attach_suffix(prefix, suffix)
     rng = np.random.default_rng(seed)
     X0 = np.clip(rng.normal(0.0, 0.06, size=(n_points, 3)), -2.0, 2.0)
     projector = lambda X: project_box(X, -2.0, 2.0)
     anchor = (-4.0, -4.0, -4.0)
     ref = approx_reference(three_peaks_objective, projector, 3, -2.0, 2.0, 600, np.random.default_rng(seed + 100))
-    res = run_projected_ascent(three_peaks_objective, three_peaks_jacobian, projector, X0, anchor, alpha0=0.05, max_iter=max_iter, sigma=0.08, tau=5e-4, shrink=0.99, max_retries=8, alpha_floor=1e-4, stall_limit=30, exact_front_threshold=exact_front_threshold, progress_every=progress_every, quiet=quiet, indicator=indicator)
+    if move == 'gradient':
+        res = run_projected_ascent(three_peaks_objective, three_peaks_jacobian, projector, X0, anchor, alpha0=0.05, max_iter=max_iter, sigma=0.08, tau=5e-4, shrink=0.99, max_retries=8, alpha_floor=1e-4, stall_limit=30, exact_front_threshold=exact_front_threshold, progress_every=progress_every, quiet=quiet, indicator=indicator)
+    elif move == 'stochastic':
+        res = run_stochastic_hillclimb(three_peaks_objective, projector, X0, anchor, rng=np.random.default_rng(seed + 1000), alpha0=0.05, max_iter=max_iter, sigma=0.08, tau=5e-4, shrink=0.99, max_retries=8, alpha_floor=1e-4, stall_limit=30, exact_front_threshold=exact_front_threshold, progress_every=progress_every, quiet=quiet, indicator=indicator)
+    else:
+        raise ValueError(f'unknown move: {move}')
     save_csv(out / f'{prefix}_initial_decisions.csv', ['x1', 'x2', 'x3'], res.X0)
     save_csv(out / f'{prefix}_final_decisions.csv', ['x1', 'x2', 'x3'], res.Xf)
     save_csv(out / f'{prefix}_initial_objectives.csv', ['f1', 'f2', 'f3'], res.Y0)
@@ -815,6 +946,7 @@ def run_three_peaks(prefix='three_peaks', outdir='.', seed=8, n_points=15, max_i
     summary = summarize_result('three_peaks', res, ref)
     summary['indicator'] = indicator
     summary['initialization'] = initialization
+    summary['move'] = move
     if initialization == 'dasdenis':
         summary['dd_h'] = int(dd_h)
         summary['dd_sigma'] = float(dd_sigma)
@@ -822,17 +954,22 @@ def run_three_peaks(prefix='three_peaks', outdir='.', seed=8, n_points=15, max_i
     return summary
 
 
-def run_crashworthiness(prefix='vehicle_crashworthiness', outdir='.', seed=9, n_points=15, max_iter=96, exact_front_threshold=10, progress_every=10, quiet=False, indicator='magnitude'):
+def run_crashworthiness(prefix='vehicle_crashworthiness', outdir='.', seed=9, n_points=15, max_iter=96, exact_front_threshold=10, progress_every=10, quiet=False, indicator='magnitude', move='gradient'):
     out = Path(outdir)
     out.mkdir(parents=True, exist_ok=True)
-    suffix = make_setting_suffix('vehicle_crashworthiness', seed=seed, n_points=n_points, crash_iters=max_iter, exact_front_threshold=exact_front_threshold, indicator=indicator)
+    suffix = make_setting_suffix('vehicle_crashworthiness', seed=seed, n_points=n_points, crash_iters=max_iter, exact_front_threshold=exact_front_threshold, indicator=indicator, move=move)
     prefix = attach_suffix(prefix, suffix)
     rng = np.random.default_rng(seed)
     obj, jac, meta = make_crash_transform(seed + 50, 500)
     projector = lambda X: project_box(X, 1.0, 3.0)
     X0 = rng.uniform(1.0, 3.0, size=(n_points, 5))
     ref = approx_reference(obj, projector, 5, 1.0, 3.0, 700, np.random.default_rng(seed + 200))
-    res = run_projected_ascent(obj, jac, projector, X0, (-0.2, -0.2, -0.2), alpha0=0.02, max_iter=max_iter, sigma=0.06, tau=5e-4, shrink=0.99, max_retries=8, alpha_floor=1e-4, stall_limit=30, exact_front_threshold=exact_front_threshold, progress_every=progress_every, quiet=quiet, indicator=indicator)
+    if move == 'gradient':
+        res = run_projected_ascent(obj, jac, projector, X0, (-0.2, -0.2, -0.2), alpha0=0.02, max_iter=max_iter, sigma=0.06, tau=5e-4, shrink=0.99, max_retries=8, alpha_floor=1e-4, stall_limit=30, exact_front_threshold=exact_front_threshold, progress_every=progress_every, quiet=quiet, indicator=indicator)
+    elif move == 'stochastic':
+        res = run_stochastic_hillclimb(obj, projector, X0, (-0.2, -0.2, -0.2), rng=np.random.default_rng(seed + 1000), alpha0=0.02, max_iter=max_iter, sigma=0.06, tau=5e-4, shrink=0.99, max_retries=8, alpha_floor=1e-4, stall_limit=30, exact_front_threshold=exact_front_threshold, progress_every=progress_every, quiet=quiet, indicator=indicator)
+    else:
+        raise ValueError(f'unknown move: {move}')
     save_csv(out / f'{prefix}_initial_decisions.csv', [f'x{i}' for i in range(1, 6)], res.X0)
     save_csv(out / f'{prefix}_final_decisions.csv', [f'x{i}' for i in range(1, 6)], res.Xf)
     save_csv(out / f'{prefix}_initial_objectives.csv', ['g1', 'g2', 'g3'], res.Y0)
@@ -847,6 +984,7 @@ def run_crashworthiness(prefix='vehicle_crashworthiness', outdir='.', seed=9, n_
     summary['normalization'] = meta
     summary['indicator'] = indicator
     summary['initialization'] = initialization
+    summary['move'] = move
     if initialization == 'dasdenis':
         summary['dd_h'] = int(dd_h)
         summary['dd_sigma'] = float(dd_sigma)
@@ -904,6 +1042,7 @@ def main():
     ap.add_argument('--initialization', choices=['random', 'dasdenis'], default='random')
     ap.add_argument('--dd-h', type=int, default=3)
     ap.add_argument('--dd-sigma', type=float, default=0.01)
+    ap.add_argument('--move', choices=['gradient', 'stochastic'], default='gradient')
     args = ap.parse_args()
 
     if args.self_test:
@@ -918,14 +1057,14 @@ def main():
 
     summaries = {}
     if args.problem in ('three_peaks', 'both'):
-        summaries['three_peaks'] = run_three_peaks(outdir=args.outdir, seed=args.seed, n_points=args.n_points, max_iter=args.three_peaks_iters, exact_front_threshold=args.exact_front_threshold, progress_every=args.progress_every, quiet=args.quiet, indicator=args.indicator)
+        summaries['three_peaks'] = run_three_peaks(outdir=args.outdir, seed=args.seed, n_points=args.n_points, max_iter=args.three_peaks_iters, exact_front_threshold=args.exact_front_threshold, progress_every=args.progress_every, quiet=args.quiet, indicator=args.indicator, move=args.move)
     if args.problem in ('bulged_three_peaks', 'both'):
-        summaries['bulged_three_peaks'] = run_bulged_three_peaks(outdir=args.outdir, seed=args.seed, n_points=args.n_points, max_iter=args.three_peaks_iters, gamma=args.bulge_gamma, exact_front_threshold=args.exact_front_threshold, progress_every=args.progress_every, quiet=args.quiet, indicator=args.indicator, initialization=args.initialization, dd_h=args.dd_h, dd_sigma=args.dd_sigma)
+        summaries['bulged_three_peaks'] = run_bulged_three_peaks(outdir=args.outdir, seed=args.seed, n_points=args.n_points, max_iter=args.three_peaks_iters, gamma=args.bulge_gamma, exact_front_threshold=args.exact_front_threshold, progress_every=args.progress_every, quiet=args.quiet, indicator=args.indicator, initialization=args.initialization, dd_h=args.dd_h, dd_sigma=args.dd_sigma, move=args.move)
     if args.problem in ('vehicle_crashworthiness', 'both'):
-        summaries['vehicle_crashworthiness'] = run_crashworthiness(outdir=args.outdir, seed=args.seed + 1, n_points=args.n_points, max_iter=args.crash_iters, exact_front_threshold=args.exact_front_threshold, progress_every=args.progress_every, quiet=args.quiet, indicator=args.indicator)
+        summaries['vehicle_crashworthiness'] = run_crashworthiness(outdir=args.outdir, seed=args.seed + 1, n_points=args.n_points, max_iter=args.crash_iters, exact_front_threshold=args.exact_front_threshold, progress_every=args.progress_every, quiet=args.quiet, indicator=args.indicator, move=args.move)
     out = Path(args.outdir)
     out.mkdir(parents=True, exist_ok=True)
-    summary_suffix = make_setting_suffix(args.problem, seed=args.seed, n_points=args.n_points, three_peaks_iters=args.three_peaks_iters, crash_iters=args.crash_iters, exact_front_threshold=args.exact_front_threshold, bulge_gamma=args.bulge_gamma, indicator=args.indicator)
+    summary_suffix = make_setting_suffix(args.problem, seed=args.seed, n_points=args.n_points, three_peaks_iters=args.three_peaks_iters, crash_iters=args.crash_iters, exact_front_threshold=args.exact_front_threshold, bulge_gamma=args.bulge_gamma, indicator=args.indicator, initialization=args.initialization, dd_h=args.dd_h, dd_sigma=args.dd_sigma, move=args.move)
     with open(out / 'benchmark_summary.json', 'w') as f:
         json.dump(summaries, f, indent=2)
     if summary_suffix:
