@@ -4,7 +4,7 @@ This repository contains a single self-contained Python script for running a Cla
 
 Current script:
 
-- `layered_magnitude_3d_singlefile_bulged_hv_recovery.py`
+- `layered_magnitude_3d_singlefile_bulged_hv_recovery_names_dd.py`
 
 ## Features
 
@@ -15,6 +15,8 @@ Current script:
 - adjustable **bulge** parameter for the bulged three-peaks benchmark
 - progress output during optimization
 - step-size **recovery from stagnation**
+- exact **Das–Dennis simplex-grid initialization**
+- compact output filenames with short suffixes for non-default settings
 - PNG and CSV outputs
 
 ## Requirements
@@ -30,61 +32,39 @@ Install with:
 python -m pip install numpy matplotlib
 ```
 
-## Quick start
-
-Run the bulged three-peaks benchmark with magnitude gradients:
+## Main script
 
 ```bash
-python layered_magnitude_3d_singlefile_bulged_hv_recovery.py \
-  --problem bulged_three_peaks \
-  --n-points 15 \
-  --three-peaks-iters 200 \
-  --bulge-gamma 0.25 \
-  --indicator magnitude \
-  --progress-every 10
-```
-
-Run the same benchmark with hypervolume gradients:
-
-```bash
-python layered_magnitude_3d_singlefile_bulged_hv_recovery.py \
-  --problem bulged_three_peaks \
-  --n-points 15 \
-  --three-peaks-iters 200 \
-  --bulge-gamma 0.25 \
-  --indicator hypervolume \
-  --progress-every 10
-```
-
-Run the original three-peaks benchmark:
-
-```bash
-python layered_magnitude_3d_singlefile_bulged_hv_recovery.py \
-  --problem three_peaks \
-  --n-points 15 \
-  --three-peaks-iters 200 \
-  --indicator magnitude
-```
-
-Run crashworthiness:
-
-```bash
-python layered_magnitude_3d_singlefile_bulged_hv_recovery.py \
-  --problem vehicle_crashworthiness \
-  --n-points 15 \
-  --crash-iters 96 \
-  --indicator magnitude
+python layered_magnitude_3d_singlefile_bulged_hv_recovery_names_dd.py
 ```
 
 ## Problems
 
-### 1. `three_peaks`
+Use one of:
 
-Synthetic three-objective benchmark with peaks at the unit vectors.
+- `--problem three_peaks`
+- `--problem bulged_three_peaks`
+- `--problem vehicle_crashworthiness`
+- `--problem both`
 
-### 2. `bulged_three_peaks`
+## Indicator option
 
-A simplex-constrained benchmark with adjustable bulge parameter `gamma`:
+Choose:
+
+- `--indicator magnitude`
+- `--indicator hypervolume`
+
+For `magnitude`, the 3D quantity includes:
+
+- edge / axis terms
+- face / projected-area terms
+- volume / hypervolume term
+
+For `hypervolume`, only the hypervolume part is optimized.
+
+## Bulged three-peaks benchmark
+
+The bulged simplex benchmark uses
 
 ```text
 f_i(x) = 1 - (||x - e_i||_2^2 / 2)^gamma,   i = 1,2,3
@@ -98,26 +78,95 @@ where:
 
 and `x` is projected onto the simplex.
 
-Smaller `gamma` gives a stronger bulge toward `(1,1,1)` in objective space.
+Control the bulge with:
 
-### 3. `vehicle_crashworthiness`
+```bash
+--bulge-gamma 0.25
+```
 
-Three-objective engineering benchmark with five decision variables and box constraints.
+Smaller `gamma` gives a stronger bend toward `(1,1,1)` in objective space.
 
-## Indicator option
+## Initialization
 
-Use:
+Choose:
 
-- `--indicator magnitude`
-- `--indicator hypervolume`
+- `--initialization random`
+- `--initialization dasdenis`
 
-For `magnitude`, the 3D quantity includes:
+### Das–Dennis initialization
 
-- edge / axis terms
-- face / projected-area terms
-- volume / hypervolume term
+For simplex-based problems, the script supports an exact Das–Dennis grid with a small perturbation and reprojection to the simplex.
 
-For `hypervolume`, only the hypervolume part is optimized.
+Control it with:
+
+```bash
+--initialization dasdenis
+--dd-h 3
+--dd-sigma 0.01
+```
+
+For 3 objectives, the exact Das–Dennis cardinality is
+
+```text
+(H + 1)(H + 2) / 2
+```
+
+Examples:
+
+- `H=1` gives `3` points
+- `H=2` gives `6` points
+- `H=3` gives `10` points
+- `H=4` gives `15` points
+
+So if you want 10 simplex-grid points, use:
+
+```bash
+python layered_magnitude_3d_singlefile_bulged_hv_recovery_names_dd.py \
+  --problem bulged_three_peaks \
+  --initialization dasdenis \
+  --dd-h 3 \
+  --dd-sigma 0.01
+```
+
+## Quick examples
+
+Bulged three-peaks with magnitude gradients:
+
+```bash
+python layered_magnitude_3d_singlefile_bulged_hv_recovery_names_dd.py \
+  --problem bulged_three_peaks \
+  --initialization dasdenis \
+  --dd-h 3 \
+  --dd-sigma 0.01 \
+  --bulge-gamma 0.25 \
+  --indicator magnitude \
+  --three-peaks-iters 200 \
+  --progress-every 10
+```
+
+Bulged three-peaks with hypervolume gradients:
+
+```bash
+python layered_magnitude_3d_singlefile_bulged_hv_recovery_names_dd.py \
+  --problem bulged_three_peaks \
+  --initialization dasdenis \
+  --dd-h 3 \
+  --dd-sigma 0.01 \
+  --bulge-gamma 0.25 \
+  --indicator hypervolume \
+  --three-peaks-iters 200 \
+  --progress-every 10
+```
+
+Crashworthiness:
+
+```bash
+python layered_magnitude_3d_singlefile_bulged_hv_recovery_names_dd.py \
+  --problem vehicle_crashworthiness \
+  --n-points 15 \
+  --crash-iters 96 \
+  --indicator magnitude
+```
 
 ## Exact and switched modes
 
@@ -157,18 +206,43 @@ Silence progress output with:
 --quiet
 ```
 
-## Step-size recovery
+## Step-size adaptation and recovery
 
 The line search uses a reduction factor of `0.99`.
 
 If the step size becomes too small and the run stagnates for a while, the code attempts a controlled increase of the step size again. This is intended to help the method recover from long stagnation phases near the alpha floor.
+
+## Output filenames
+
+Output filenames automatically include a compact suffix for **non-default settings only**.
+
+Two-letter tags are used, for example:
+
+- `se` = seed
+- `np` = n-points
+- `tp` = three-peaks-iters
+- `cr` = crash-iters
+- `ex` = exact-front-threshold
+- `bu` = bulge-gamma
+- `in` = indicator
+- `dd` = dd-h
+- `ds` = dd-sigma
+- `ii` = initialization
+
+So a run with non-default settings may produce names like:
+
+```text
+bulged_three_peaks_dd3_ds0p01_bu0p25_inhypervolume_iidasdenis_objective_space.png
+```
+
+Default-valued settings are omitted from the suffix.
 
 ## Output files
 
 The script writes files such as:
 
 - `*_objective_space.png`
-- `*_decision_space.png` (for three-peaks variants)
+- `*_decision_space.png` (for simplex / three-peaks variants)
 - `*_convergence.png`
 - `*_initial_decisions.csv`
 - `*_final_decisions.csv`
@@ -177,26 +251,6 @@ The script writes files such as:
 - `*_reference_archive.csv`
 - `*_history.csv`
 - `benchmark_summary.json`
-
-## Examples
-
-Bulged front with stronger bend:
-
-```bash
-python layered_magnitude_3d_singlefile_bulged_hv_recovery.py \
-  --problem bulged_three_peaks \
-  --bulge-gamma 0.25 \
-  --indicator magnitude
-```
-
-Hypervolume-driven run:
-
-```bash
-python layered_magnitude_3d_singlefile_bulged_hv_recovery.py \
-  --problem bulged_three_peaks \
-  --bulge-gamma 0.25 \
-  --indicator hypervolume
-```
 
 ## Clarke-motivated
 
